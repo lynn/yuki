@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import reduce
 from parsy import string, regex, generate, whitespace # type: ignore
-from typing import Callable, Mapping, Iterator, List, Set, NoReturn, Union
+from typing import Callable, Mapping, Iterator, List, Sequence, Set, NoReturn, Union
 import inspect
 
 def log(x):
@@ -59,21 +59,21 @@ def pArr():
 
 @dataclass(frozen=True, order=True)
 class YUnion:
-    types: List['YType']
+    types: Sequence['YType']
     def __str__(x): return ' | '.join(map(str, x.types)).join('()')
 @generate("pUnion")
 def pUnion():
-    types = yield pType0.sep_by(ws >> string('|') >> ws, min=1)
-    return YUnion(types)
+    types = yield pType0.sep_by(ws >> string('|') >> ws, min=2)
+    return YUnion(tuple(types))
 
 @dataclass(frozen=True, order=True)
 class YIntersection:
-    types: 'YType'
+    types: Sequence['YType']
     def __str__(x): return ' & '.join(map(str, x.types)).join('()')
 @generate("pIntersection")
 def pIntersection():
-    types = yield pType0.sep_by(ws >> string('&') >> ws, min=1)
-    return YIntersection(types)
+    types = yield pType0.sep_by(ws >> string('&') >> ws, min=2)
+    return YIntersection(tuple(types))
 
 @generate("pParenType")
 def pParenType():
@@ -81,7 +81,7 @@ def pParenType():
 
 YType = Union[YPos, YZero, YNeg, YBool, YList, YArrow, YUnion, YIntersection]
 pType0 = pPos | pZero | pNeg | pBool | pList | pParenType
-pType = pArr | pUnion | pIntersection | pType0
+pType = pArr | pIntersection | pUnion | pType0
 
 # The squiggly arrow step in Pierce 1990, page 32.
 def normalize_step(t: YType):
@@ -90,47 +90,48 @@ def normalize_step(t: YType):
         rec = YArrow(normalize_step(t.source), normalize_step(t.target))
         if isinstance(rec.target, YIntersection):
             # Dist-IA-R
-            return YIntersection([YArrow(rec.source, u) for u in rec.target.types])
+            return YIntersection(tuple(YArrow(rec.source, u) for u in rec.target.types))
         elif isinstance(rec.source, YUnion):
             # Dist-IA-L
-            return YIntersection([YArrow(u, rec.target) for u in rec.source.types])
+            return YIntersection(tuple(YArrow(u, rec.target) for u in rec.source.types))
         return rec
     elif isinstance(t, YIntersection):
-        types = []
+        itypes: List[YType] = []
         # Congr-Inter and Flatten-Inter
         for u in t.types:
             c = normalize_step(u)
             if isinstance(c, YIntersection):
-                types += c.types
+                itypes += c.types
             else:
-                types.append(c)
+                itypes.append(c)
         # Unnest-Inter
-        if len(types) == 1: return types[0]
+        if len(itypes) == 1: return itypes[0]
         # Sort-Inter
-        types.sort()
+        itypes.sort(key=hash)
         # Absorb-Inter
-        for i, u in enumerate(types):
-            a = YIntersection(types[:i] + types[i+1:])
-            if is_subtype(a, u): return a
-        return YIntersection(types)
+        for i, u in enumerate(itypes):
+            ai = YIntersection(tuple(itypes[:i] + itypes[i+1:]))
+            isst = is_subtype(ai, u)
+            if is_subtype(ai, u): return ai
+        return YIntersection(tuple(itypes))
     elif isinstance(t, YUnion):
-        types = []
+        utypes: List[YType] = []
         # Congr-Union and Flatten-Union
         for u in t.types:
             c = normalize_step(u)
             if isinstance(c, YUnion):
-                types += c.types
+                utypes += c.types
             else:
-                types.append(c)
+                utypes.append(c)
         # Unnest-Union
-        if len(types) == 1: return types[0]
+        if len(utypes) == 1: return utypes[0]
         # Sort-Union
-        types.sort()
+        utypes.sort(key=hash)
         # Absorb-Union
-        for i, u in enumerate(types):
-            a = YUnion(types[:i] + types[i+1:])
-            if is_subtype(u, a): return a
-        return YUnion(types)
+        for i, u in enumerate(utypes):
+            au = YUnion(tuple(utypes[:i] + utypes[i+1:]))
+            if is_subtype(u, au): return au
+        return YUnion(tuple(utypes))
     else:
         return t
 
@@ -142,33 +143,36 @@ def normalize(t: YType):
         old = t
 
 def is_subtype(t1, t2):
-    # log(f'--- Checking if {t1} <: {t2}')
-    if t1 == t2: return True
-    if isinstance(t1, YUnion):
+    log(f'--- Checking if {t1} <: {t2}')
+    if t1 == t2:
+        return True
+    elif isinstance(t1, YUnion):
         return all(is_subtype(u, t2) for u in t1.types)
     elif isinstance(t2, YUnion):
         return any(is_subtype(t1, u) for u in t2.types)
-    '''
     elif isinstance(t1, YIntersection):
-        return is_subtype(eliminate_intersection(t1), t2)
+        return any(is_subtype(u, t2) for u in t1.types)
     elif isinstance(t2, YIntersection):
-        return is_subtype(t1, t2.left) and is_subtype(t1, t2.right)
+        return all(is_subtype(t1, u) for u in t2.types)
     elif isinstance(t1, YArrow) and isinstance(t2, YArrow):
         return is_subtype(t2.source, t1.source) and is_subtype(t1.target, t2.target)
-    '''
     return False
 
-print(normalize(YUnion([YPos(), YPos()])))
-
-'''
-
-def max_type(t1, t2):
+def type_join(t1, t2):
     if is_subtype(t1, t2):
         return t2
     elif is_subtype(t2, t1):
         return t1
     else:
-        return YUnion(t1, t2)
+        return normalize(YUnion((t1, t2)))
+
+def type_meet(t1, t2):
+    if is_subtype(t1, t2):
+        return t1
+    elif is_subtype(t2, t1):
+        return t2
+    else:
+        return normalize(YIntersection((t1, t2)))
 
 #####################################################################
 #
@@ -269,13 +273,6 @@ Context = Mapping[str, YType]
 def dictstr(d):
     return '{' + ', '.join(f'{k}: {v}' for k, v in d.items()) + '}'
 
-def intersection_members(t: YType) -> Iterator[YType]:
-    if isinstance(t, YIntersection):
-        yield from intersection_members(t.left)
-        yield from intersection_members(t.right)
-    else:
-        yield t
-
 class IllTyped(Exception): pass
 class UnknownVariable(Exception): pass
 class Limitation(Exception): pass
@@ -300,31 +297,15 @@ def synth(Γ: Context, expr: YExpr) -> YType:
             check(Γ, expr.argument, tf.source)
             return tf.target
         elif isinstance(tf, YIntersection):
-            ta = synth(Γ, expr.argument)
-            targets: Set[YType] = set()
-            for i in intersection_members(tf):
-                if not isinstance(i, YArrow):
-                    raise Limitation(f"I don't understand intersections of non-function types.")
-                log(f'~~~ Now checking: {i.source} <: {ta}')
-                # I am almost 100% sure this is wrong
-                if is_subtype(i.source, ta):
-                    targets.add(i.target)
-            if targets:
-                # I am more than 100% sure this is wrong...
-                # TODO     have thoughts. brain full
-                if all(isinstance(x, YArrow) for x in targets):
-                    return reduce(YIntersection, targets)
-                return reduce(YUnion, targets)
-            else:
-                raise IllTyped(f"blahh\n{expr.function} : {tf}\n{expr.argument} : {ta}\n{targets}")
+            raise Limitation(f"TODO: synthesize a type for {expr}, where the function has intersection type {tf}.")
         else:
             raise IllTyped(f"You can't apply {expr.function} : {tf} to anything, because it's not a function.")
     elif isinstance(expr, YIfSubtype):
         log(f'!!! Refining type of {expr.scrutinee} to {expr.type} in {expr.thenBody}...')
         tt = synth({**Γ, expr.scrutinee.name: expr.type}, expr.thenBody)
         tf = synth(Γ, expr.elseBody)
-        log(f'max_type({tt}, {tf}) == {max_type(tt, tf)}')
-        return max_type(tt, tf)
+        log(f'type_join({tt}, {tf}) == {type_join(tt, tf)}')
+        return type_join(tt, tf)
     elif isinstance(expr, YAnno):
         check(Γ, expr.expression, expr.annotatedType)
         return expr.annotatedType
@@ -436,4 +417,3 @@ print(ast)
 Γprelude = {k: v.type for k, v in prelude.items()}
 print(synth(Γprelude, ast))
 print(evaluate(prelude, ast))
-'''
