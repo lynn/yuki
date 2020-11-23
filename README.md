@@ -17,3 +17,5 @@ mul = __builtin_mul
 square : (zero|pos|neg) -> (zero|pos)
 square = fn x => mul x x
 ```
+
+(so, the integer type is a union `zero|pos|neg`, and we infer from the type of `mul` that a `square` is indeed never `neg`ative.)
