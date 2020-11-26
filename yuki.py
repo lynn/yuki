@@ -33,9 +33,14 @@ class YNeg:
 pNeg = string('neg').result(YNeg())
 
 @dataclass(frozen=True, order=True)
-class YBool:
-    def __str__(x): return 'bool'
-pBool = string('bool').result(YBool())
+class YTrue:
+    def __str__(x): return 'true'
+pTrue = string('true').result(YTrue())
+
+@dataclass(frozen=True, order=True)
+class YFalse:
+    def __str__(x): return 'false'
+pFalse = string('false').result(YFalse())
 
 @dataclass(frozen=True, order=True)
 class YList:
@@ -79,8 +84,8 @@ def pIntersection():
 def pParenType():
     return (yield string('(') >> ws >> pType << ws << string(')'))
 
-YType = Union[YPos, YZero, YNeg, YBool, YList, YArrow, YUnion, YIntersection]
-pType0 = pPos | pZero | pNeg | pBool | pList | pParenType
+YType = Union[YPos, YZero, YNeg, YTrue, YFalse, YList, YArrow, YUnion, YIntersection]
+pType0 = pPos | pZero | pNeg | pTrue | pFalse | pList | pParenType
 pType = pArr | pIntersection | pUnion | pType0
 
 # The squiggly arrow step in Pierce 1990, page 32.
@@ -111,7 +116,6 @@ def normalize_step(t: YType):
         # Absorb-Inter
         for i, u in enumerate(itypes):
             ai = YIntersection(tuple(itypes[:i] + itypes[i+1:]))
-            isst = is_subtype(ai, u)
             if is_subtype(ai, u): return ai
         return YIntersection(tuple(itypes))
     elif isinstance(t, YUnion):
@@ -142,8 +146,11 @@ def normalize(t: YType):
         if t == old: return t
         old = t
 
+subtype_checks = 0
 def is_subtype(t1, t2):
-    log(f'--- Checking if {t1} <: {t2}')
+    global subtype_checks
+    subtype_checks += 1
+    # log(f'--- Checking if {t1} <: {t2}')
     if t1 == t2:
         return True
     elif isinstance(t1, YUnion):
@@ -187,12 +194,15 @@ class YLitNumber:
 pLitNumber = regex(r'-?[0-9]+').map(int).map(YLitNumber)
 
 @dataclass(frozen=True, order=True)
-class YLitBool:
-    value: bool
-    def __str__(x): return str(x.value).lower()
-pTrue = string('true').result(True).map(YLitBool)
-pFalse = string('false').result(False).map(YLitBool)
-pLitBool = pTrue | pFalse
+class YLitTrue:
+    def __str__(x): return 'tt'
+pLitTrue = string('tt').result(True).map(YLitTrue)
+
+@dataclass(frozen=True, order=True)
+class YLitFalse:
+    def __str__(x): return 'ff'
+pLitFalse = string('ff').result(True).map(YLitFalse)
+pLitBool = pLitTrue | pLitFalse
 
 @dataclass(frozen=True, order=True)
 class YVar:
@@ -254,7 +264,7 @@ def pIfSubtype():
     thenBody = yield ws >> string('then') >> ws >> pLow
     elseBody = yield ws >> string('else') >> ws >> pLow << ws << string('end')
     return YIfSubtype(scrutinee, type, thenBody, elseBody)
-YExpr = Union[YLitNumber, YLitBool, YBuiltin, YVar, YLam, YAnno, YApp, YIfSubtype]
+YExpr = Union[YLitNumber, YLitTrue, YLitFalse, YBuiltin, YVar, YLam, YAnno, YApp, YIfSubtype]
 
 @generate
 def pParen():
@@ -282,8 +292,10 @@ def synth(Γ: Context, expr: YExpr) -> YType:
     log(f'Synthing type for {expr}.') # {dictstr(Γ)}')
     if isinstance(expr, YLitNumber):
         return YPos() if expr.value > 0 else YNeg() if expr.value < 0 else YZero()
-    elif isinstance(expr, YLitBool):
-        return YBool()
+    elif isinstance(expr, YLitTrue):
+        return YTrue()
+    elif isinstance(expr, YLitFalse):
+        return YFalse()
     elif isinstance(expr, YBuiltin):
         return expr.type
     elif isinstance(expr, YVar):
@@ -291,13 +303,25 @@ def synth(Γ: Context, expr: YExpr) -> YType:
             raise UnknownVariable(f"I don't know what '{expr.name}' refers to.")
         return Γ[expr.name]
     elif isinstance(expr, YApp):
-        tf = synth(Γ, expr.function)
+        tf = normalize(synth(Γ, expr.function))
         
         if isinstance(tf, YArrow):
             check(Γ, expr.argument, tf.source)
             return tf.target
         elif isinstance(tf, YIntersection):
-            raise Limitation(f"TODO: synthesize a type for {expr}, where the function has intersection type {tf}.")
+            ta = normalize(synth(Γ, expr.argument))
+            tas = ta.types if isinstance(ta, YUnion) else [ta]
+            union_members = []
+            for t in tas:
+                targets = []
+                for u in tf.types:
+                    if isinstance(u, YArrow) and is_subtype(t, u.source):
+                        targets.append(u.target)
+                union_members.append(YIntersection(tuple(targets)))
+            return normalize(YUnion(tuple(union_members)))
+        elif isinstance(tf, YUnion):
+            ta = normalize(synth(Γ, expr.argument))
+            raise Limitation(f"{tf} of {ta}")
         else:
             raise IllTyped(f"You can't apply {expr.function} : {tf} to anything, because it's not a function.")
     elif isinstance(expr, YIfSubtype):
@@ -312,8 +336,16 @@ def synth(Γ: Context, expr: YExpr) -> YType:
     else:
         raise Limitation(f"I don't know how to synthesize a type for {expr}. You'll need to annotate the type for me.")
 
+def is_lambda_type(t: YType) -> bool:
+    if isinstance(t, YArrow): return True
+    if isinstance(t, YIntersection) and any(is_lambda_type(u) for u in t.types): return True
+    return False
+
+
+
 def check(Γ: Context, expr: YExpr, t: YType) -> None:
     log(f'Checking that {expr} is a {t}.')
+    t = normalize(t)
     #
     #   this stuff is commented out because it's synth()'s job
     #
@@ -332,14 +364,18 @@ def check(Γ: Context, expr: YExpr, t: YType) -> None:
     #    if t != Γ[expr.name]:
     #        raise ValueError(f"I expected a {t} here, but I found '{expr.name}' of type {t}.")
     if isinstance(expr, YLam):
-        if not isinstance(t, YArrow):
+        if isinstance(t, YArrow):
+            check({**Γ, expr.variable.name: t.source}, expr.body, t.target)
+        elif isinstance(t, YIntersection):
+            for u in t.types:
+                check(Γ, expr, u)
+        else:
             raise IllTyped(f"{expr} is a lambda, but I was expecting a {t}.")
-        check({**Γ, expr.variable.name: t.source}, expr.body, t.target)
     else:
         # turn around
         t0 = synth(Γ, expr)
         if not is_subtype(t0, t):
-            raise IllTyped(f"I synthesized {t0} for {expr}, but it's not a subtype of {t}.")
+            raise IllTyped(f"I synthesized {t0} for {expr}, but it's not a subtype of {t}.\nΓ = {dictstr(Γ)}")
 
 #####################################################################
 #
@@ -352,7 +388,9 @@ Environment = Mapping[str, YExpr]
 def evaluate(E: Environment, expr: YExpr) -> YExpr:
     if isinstance(expr, YLitNumber):
         return expr
-    elif isinstance(expr, YLitBool):
+    elif isinstance(expr, YLitTrue):
+        return expr
+    elif isinstance(expr, YLitFalse):
         return expr
     elif isinstance(expr, YLam):
         return expr
@@ -408,12 +446,25 @@ prelude = {
         impl=lambda x: closure(lambda y: YLitNumber(x.value + y.value)),
         name='add',
     ),
+    'mul': YBuiltin(
+        type=pType.parse('(pos->pos->pos) & (pos->zero->zero) & (pos->neg->neg) & (zero->pos->zero) & (zero->zero->zero) & (zero->neg->zero) & (neg->pos->neg) & (neg->zero->zero) & (neg->neg->pos)'),
+        impl=lambda x: closure(lambda y: YLitNumber(x.value * y.value)),
+        name='mul',
+    ),
+    'geq': YBuiltin(
+        type=pType.parse('(pos->pos->(true|false)) & (pos->zero->true) & (pos->neg->true) & (zero->pos->(true|false)) & (zero->zero->true) & (zero->neg->true) & (neg->pos->false) & (neg->zero->(true|false)) & (neg->neg->(true|false))'),
+        impl=lambda x: closure(lambda y: YLitTrue() if x.value >= y.value else YLitFalse()),
+        name='geq',
+    )
 }
 
-ast = pExpr.parse('((fn x => if x <: (pos|zero) then (sqrt x) else -1 end) : (pos|zero|neg) -> (pos|zero|neg)) 16')
+# ast = pExpr.parse('((fn x => if x <: (pos|zero) then (sqrt x) else -1 end) : (pos|zero|neg) -> (pos|zero|neg)) 16')
 # ast = pExpr.parse('((fn x => add 3 x) : pos -> pos) 16')
-# ast = pExpr.parse('add 3')
+# ast = pExpr.parse('((fn x => mul x x) : (pos -> pos) & (neg -> pos) & (zero -> zero))')
+ast = pExpr.parse('((fn x => geq (mul x x) 0) : (pos|neg|zero) -> true)')
 print(ast)
+print(normalize(ast.annotatedType))
 Γprelude = {k: v.type for k, v in prelude.items()}
 print(synth(Γprelude, ast))
 print(evaluate(prelude, ast))
+print(f'Performed {subtype_checks} subtype checks.')
