@@ -301,10 +301,11 @@ def synth(Γ: Context, expr: YExpr) -> YType:
     elif isinstance(expr, YVar):
         if expr.name not in Γ:
             raise UnknownVariable(f"I don't know what '{expr.name}' refers to.")
+        log(str(Γ[expr.name]))
         return Γ[expr.name]
     elif isinstance(expr, YApp):
         tf = normalize(synth(Γ, expr.function))
-        
+
         if isinstance(tf, YArrow):
             check(Γ, expr.argument, tf.source)
             return tf.target
@@ -317,7 +318,10 @@ def synth(Γ: Context, expr: YExpr) -> YType:
                 for u in tf.types:
                     if isinstance(u, YArrow) and is_subtype(t, u.source):
                         targets.append(u.target)
-                union_members.append(YIntersection(tuple(targets)))
+                if targets:
+                    union_members.append(YIntersection(tuple(targets)))
+            if not union_members:
+                raise IllTyped(f"You can't apply {expr.function} : {tf} to {expr.argument} : {ta}.")
             return normalize(YUnion(tuple(union_members)))
         elif isinstance(tf, YUnion):
             ta = normalize(synth(Γ, expr.argument))
@@ -461,9 +465,10 @@ prelude = {
 # ast = pExpr.parse('((fn x => if x <: (pos|zero) then (sqrt x) else -1 end) : (pos|zero|neg) -> (pos|zero|neg)) 16')
 # ast = pExpr.parse('((fn x => add 3 x) : pos -> pos) 16')
 # ast = pExpr.parse('((fn x => mul x x) : (pos -> pos) & (neg -> pos) & (zero -> zero))')
-ast = pExpr.parse('((fn x => geq (mul x x) 0) : (pos|neg|zero) -> true)')
+# ast = pExpr.parse('((fn x => geq (mul x x) 0) : (pos|neg|zero) -> true)')
+ast = pExpr.parse('((fn x => add (sqrt x) 1) : ((pos | zero) -> pos)) 3')
 print(ast)
-print(normalize(ast.annotatedType))
+# print(normalize(ast.annotatedType))
 Γprelude = {k: v.type for k, v in prelude.items()}
 print(synth(Γprelude, ast))
 print(evaluate(prelude, ast))
